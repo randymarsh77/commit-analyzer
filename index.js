@@ -2,6 +2,7 @@ const {isUndefined} = require('lodash');
 const parser = require('conventional-commits-parser').sync;
 const filter = require('conventional-commits-filter');
 const debug = require('debug')('semantic-release:commit-analyzer');
+const loadFilterRules = require('./lib/load-filter-rules');
 const loadParserConfig = require('./lib/load-parser-config');
 const loadReleaseRules = require('./lib/load-release-rules');
 const analyzeCommit = require('./lib/analyze-commit');
@@ -15,6 +16,7 @@ const DEFAULT_RELEASE_RULES = require('./lib/default-release-rules');
  * @param {Object} pluginConfig The plugin configuration.
  * @param {String} pluginConfig.preset conventional-changelog preset ('angular', 'atom', 'codemirror', 'ember', 'eslint', 'express', 'jquery', 'jscs', 'jshint')
  * @param {String} pluginConfig.config Requierable npm package with a custom conventional-changelog preset
+ * @param {String|Array} pluginConfig.filterRules A `String` to load an external module or an object of rules.
  * @param {String|Array} pluginConfig.releaseRules A `String` to load an external module or an `Array` of rules.
  * @param {Object} pluginConfig.parserOpts Additional `conventional-changelog-parser` options that will overwrite ones loaded by `preset` or `config`.
  * @param {Object} context The semantic-release context.
@@ -25,6 +27,7 @@ const DEFAULT_RELEASE_RULES = require('./lib/default-release-rules');
  */
 async function analyzeCommits(pluginConfig, context) {
   const {commits, logger} = context;
+  const filterRules = loadFilterRules(pluginConfig, context);
   const releaseRules = loadReleaseRules(pluginConfig, context);
   const config = await loadParserConfig(pluginConfig, context);
   let releaseType = null;
@@ -39,7 +42,34 @@ async function analyzeCommits(pluginConfig, context) {
 
         return true;
       })
-      .map(({message, ...commitProps}) => ({rawMsg: message, message, ...commitProps, ...parser(message, config)}))
+      .map(({message, ...commitProps}) => ({
+        rawMsg: message,
+        message,
+        ...commitProps,
+        parseResult: parser(message, config),
+      }))
+      .filter(({parseResult}) => {
+        if (!filterRules) {
+          return true;
+        }
+
+        const props = Object.keys(parseResult);
+        const propsToMatch = Object.keys(filterRules).filter(x => props.includes(x));
+        const isValid = propsToMatch.reduce((allMatch, prop) => {
+          const validPattern = filterRules[prop];
+          if (!validPattern || typeof validPattern !== 'string') {
+            return allMatch;
+          }
+
+          const patternRegEx = new RegExp(validPattern);
+          const matches = patternRegEx.exec(parseResult[prop]);
+
+          return allMatch && matches;
+        }, true);
+
+        return isValid;
+      })
+      .map(({parseResult, ...rest}) => ({...rest, ...parseResult}))
   ).every(({rawMsg, ...commit}) => {
     logger.log(`Analyzing commit: %s`, rawMsg);
     let commitReleaseType;
